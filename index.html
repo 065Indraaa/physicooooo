@@ -3,7 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <title>Batch Generate Ed25519 PublicKey Base58 dari HEX Seed (WASM)</title>
-<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.11/dist/modules/libsodium-wrappers.js"></script>
+
+<!-- FIX: pakai versi UMD, bukan modules -->
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.11/dist/libsodium-wrappers.min.js"></script>
+
 <style>
   body { font-family: monospace, monospace; padding: 10px; }
   input, button { font-size: 14px; padding: 5px; margin: 5px 0; }
