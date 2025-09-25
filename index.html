@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Batch Generate Ed25519 PublicKey Base58 dari HEX Seed (WASM)</title>
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.11/dist/modules/libsodium-wrappers.js"></script>
+<style>
+  body { font-family: monospace, monospace; padding: 10px; }
+  input, button { font-size: 14px; padding: 5px; margin: 5px 0; }
+  #output { max-height: 60vh; overflow-y: auto; white-space: pre; border: 1px solid #ccc; padding: 10px; }
+  #search { width: 100%; margin: 5px 0; padding: 5px; }
+  .highlight { background: yellow; }
+  #status { margin: 5px 0; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h2>Batch Generate Ed25519 PublicKey Base58 dari HEX Seed (WASM)</h2>
+
+<label>Start HEX (64 digit): 
+  <input id="startHex" size="70" 
+  value="0000000000000000000000000000000000000000000000000000000000000001">
+</label><br>
+
+<label>End HEX (64 digit): 
+  <input id="endHex" size="70" 
+  value="fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036411c">
+</label><br>
+
+<label>Batch size (max 10000): 
+  <input id="batchSize" type="number" value="100" min="1" max="10000" style="width: 80px;">
+</label><br>
+
+<button id="prevBtn" disabled>Prev Batch</button>
+<button id="nextBtn">Next Batch</button>
+<button id="stopBtn" disabled>Stop Scan</button>
+<span id="pageInfo"></span>
+
+<!-- Status -->
+<div id="status">Menunggu libsodium (WASM)...</div>
+
+<!-- Search -->
+<input type="text" id="search" placeholder="Masukkan PublicKey Base58 ...">
+
+<div id="output"></div>
+
+<script>
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function encodeBase58(buffer) {
+  let digits = [0];
+  for (let i = 0; i < buffer.length; i++) {
+    let carry = buffer[i];
+    for (let j = 0; j < digits.length; ++j) {
+      carry += digits[j] << 8;
+      digits[j] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+  for (let k = 0; k < buffer.length && buffer[k] === 0; k++) {
+    digits.push(0);
+  }
+  return digits.reverse().map(d => ALPHABET[d]).join('');
+}
+
+function hexToUint8Array(hex) {
+  if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.slice(2);
+  if (hex.length % 2 !== 0) hex = "0" + hex;
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i*2, 2), 16);
+  }
+  return bytes;
+}
+
+function normalizeHex(hex) {
+  hex = hex.trim().toLowerCase();
+  if (hex.startsWith("0x")) hex = hex.slice(2);
+  if (!/^[0-9a-f]*$/.test(hex)) throw new Error("Invalid hex: " + hex);
+  if (hex.length > 64) throw new Error("Hex too long (max 64 digits)");
+  return hex.padStart(64, '0');
+}
+
+function bigIntToHex(bi) {
+  let h = bi.toString(16);
+  if (h.length % 2) h = "0" + h;
+  return h.padStart(64, '0');
+}
+
+function hexToBigInt(hex) {
+  if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.slice(2);
+  return BigInt("0x" + hex);
+}
+
+// Globals
+let currentStartBigInt;
+let endBigInt;
+let sodiumReady = false;
+let autoScan = false;
+let targetBase58 = "";
+let batchCounter = 0;
+let totalChecked = 0;
+
+(async () => {
+  document.getElementById('status').textContent = "Loading libsodium (WASM)...";
+  await sodium.ready;
+  sodiumReady = true;
+  document.getElementById('status').textContent = "Libsodium siap ✅";
+  generateBatch();
+})();
+
+function generateBatch() {
+  const status = document.getElementById('status');
+  if (!sodiumReady) {
+    status.textContent = "Loading libsodium (WASM)...";
+    return;
+  }
+
+  const output = document.getElementById('output');
+  const batchSizeInput = document.getElementById('batchSize');
+  const batchSize = Math.min(Math.max(parseInt(batchSizeInput.value), 1), 10000);
+
+  try {
+    const startHex = normalizeHex(document.getElementById('startHex').value);
+    const endHex = normalizeHex(document.getElementById('endHex').value);
+    if (!currentStartBigInt) currentStartBigInt = hexToBigInt(startHex);
+    if (!endBigInt) endBigInt = hexToBigInt(endHex);
+    if (currentStartBigInt > endBigInt) {
+      output.textContent = "Sudah sampai akhir range.";
+      document.getElementById('nextBtn').disabled = true;
+      status.textContent = "Selesai ✅";
+      autoScan = false;
+      document.getElementById('stopBtn').disabled = true;
+      return;
+    }
+    if (currentStartBigInt < hexToBigInt(startHex)) currentStartBigInt = hexToBigInt(startHex);
+
+    let lines = "";
+    let count = 0;
+    let found = false;
+    let foundHex = "";
+
+    batchCounter++;
+    for (let i = 0n; i < BigInt(batchSize); i++) {
+      let val = currentStartBigInt + i;
+      if (val > endBigInt) break;
+
+      let seedHex = bigIntToHex(val);
+      let seedBytes = hexToUint8Array(seedHex);
+
+      let keypair = sodium.crypto_sign_seed_keypair(seedBytes);
+      let pubkey = keypair.publicKey;
+
+      let pubkeyBase58 = encodeBase58(pubkey);
+
+      if (autoScan && pubkeyBase58 === targetBase58) {
+        found = true;
+        foundHex = seedHex;
+        lines += `${seedHex} → ${pubkeyBase58}  <<< DITEMUKAN ✅\n`;
+        break;
+      } else {
+        lines += `${seedHex} → ${pubkeyBase58}\n`;
+      }
+      count++;
+    }
+
+    totalChecked += count;
+
+    output.textContent = lines;
+    document.getElementById('pageInfo').textContent = 
+      `Menampilkan ${count} hasil mulai dari HEX ${bigIntToHex(currentStartBigInt)}`;
+
+    if (found) {
+      status.textContent = `Ditemukan ✅ HEX: ${foundHex} (Batch ke-${batchCounter}, total cek ${totalChecked})`;
+      autoScan = false;
+      document.getElementById('stopBtn').disabled = true;
+      return;
+    }
+
+    document.getElementById('prevBtn').disabled = (currentStartBigInt <= hexToBigInt(startHex));
+    document.getElementById('nextBtn').disabled = (currentStartBigInt + BigInt(batchSize) > endBigInt);
+
+    if (autoScan && !found) {
+      status.textContent = `Scanning batch ke-${batchCounter}... (total cek ${totalChecked}) | HEX terakhir: ${bigIntToHex(currentStartBigInt + BigInt(batchSize) - 1n)}`;
+      currentStartBigInt += BigInt(batchSize);
+      setTimeout(generateBatch, 0);
+    } else if (!autoScan) {
+      status.textContent = `Batch ke-${batchCounter} selesai ✅ (total cek ${totalChecked})`;
+    }
+
+  } catch(e) {
+    output.textContent = "Error: " + e.message;
+    status.textContent = "Error ❌";
+    autoScan = false;
+    document.getElementById('stopBtn').disabled = true;
+  }
+}
+
+document.getElementById('nextBtn').onclick = () => {
+  const batchSize = Math.min(Math.max(parseInt(document.getElementById('batchSize').value), 1), 10000);
+  currentStartBigInt += BigInt(batchSize);
+  generateBatch();
+}
+
+document.getElementById('prevBtn').onclick = () => {
+  const batchSize = Math.min(Math.max(parseInt(document.getElementById('batchSize').value), 1), 10000);
+  currentStartBigInt -= BigInt(batchSize);
+  if (currentStartBigInt < 1n) currentStartBigInt = 1n;
+  generateBatch();
+}
+
+document.getElementById('search').onchange = () => {
+  targetBase58 = document.getElementById('search').value.trim();
+  if (targetBase58) {
+    autoScan = true;
+    document.getElementById('stopBtn').disabled = false;
+    currentStartBigInt = null; 
+    batchCounter = 0;
+    totalChecked = 0;
+    generateBatch();
+  }
+};
+
+document.getElementById('stopBtn').onclick = () => {
+  autoScan = false;
+  document.getElementById('status').textContent = "Scan dihentikan ⏹️";
+  document.getElementById('stopBtn').disabled = true;
+};
+</script>
+</body>
+</html>
