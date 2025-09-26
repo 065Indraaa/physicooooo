@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="utf-8"/>
-<title>HEX → Pubkey + Balance (Legible Output)</title>
+<title>HEX → Pubkey + Real-time Balance</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <style>
 body {
@@ -47,10 +47,13 @@ button {
   cursor: pointer;
   margin-right: 6px;
 }
+.line-item {
+  margin-bottom: 2px;
+}
 </style>
 </head>
 <body>
-<h2>HEX → Pubkey + Balance (Real-time)</h2>
+<h2>HEX → Pubkey + Real-time Balance</h2>
 
 <label>Start HEX (64):
   <input id="startHex" style="width:100%" value="0000000000000000000000000000000000000000000000000000000000000001">
@@ -105,10 +108,9 @@ let scanning=false,stopRequested=false,currentStartBigInt=null,endBigInt=null;
 
 const outputEl=document.getElementById('output');
 const statusEl=document.getElementById('status');
-function log(s){outputEl.textContent+=s+"\n"; outputEl.scrollTop=outputEl.scrollHeight;}
-function clearOutput(){outputEl.textContent="";}
+function logLine(lineEl, text){lineEl.textContent=text; outputEl.scrollTop=outputEl.scrollHeight;}
 
-function highlightPubkey(pub){const idx=outputEl.textContent.indexOf(pub);if(idx===-1)return;const before=outputEl.textContent.slice(0,idx);const match=pub;const after=outputEl.textContent.slice(idx+pub.length);outputEl.innerHTML=escapeHtml(before)+'<span class="hit">'+escapeHtml(match)+'</span>'+escapeHtml(after);}
+function highlightPubkey(pub){const idx=outputEl.textContent.indexOf(pub);if(idx===-1)return; const before=outputEl.textContent.slice(0,idx); const match=pub; const after=outputEl.textContent.slice(idx+pub.length);outputEl.innerHTML=escapeHtml(before)+'<span class="hit">'+escapeHtml(match)+'</span>'+escapeHtml(after);}
 
 async function rpcPost(url,body,timeoutMs=20000){const controller=new AbortController(); const id=setTimeout(()=>controller.abort(),timeoutMs); try{const res=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:controller.signal}); clearTimeout(id); return await res.json();}catch(e){clearTimeout(id); throw e;}}
 async function getBalanceRpc(rpcUrl,pubkey){const body={jsonrpc:"2.0",id:1,method:"getBalance",params:[pubkey]}; const r=await rpcPost(rpcUrl,body); if(r && r.result && typeof r.result.value!=="undefined") return r.result.value; return null;}
@@ -129,14 +131,20 @@ async function scanWithBalance(batchSize,yieldEvery,parallelLimit,targetPub){
       const pub58=encodeBase58(kp.publicKey);
       pubToSeed.set(pub58,seedHex);
 
+      const lineEl = document.createElement('div');
+      lineEl.className="line-item";
+      lineEl.textContent=`${seedHex} → ${pub58} | Balance: loading...`;
+      outputEl.appendChild(lineEl);
+      outputEl.scrollTop = outputEl.scrollHeight;
+
       const p=(async()=>{
         try{
           const bal=await getBalanceRpc(rpcUrl,pub58);
           pubToBalance.set(pub58,bal);
-          log(`${seedHex} → ${pub58} | Balance: ${bal}`);
+          logLine(lineEl, `${seedHex} → ${pub58} | Balance: ${bal}`);
         }catch(e){
           pubToBalance.set(pub58,null);
-          log(`${seedHex} → ${pub58} | Balance ERR`);
+          logLine(lineEl, `${seedHex} → ${pub58} | Balance ERR`);
         }
       })();
       promises.push(p);
@@ -158,7 +166,7 @@ async function scanWithBalance(batchSize,yieldEvery,parallelLimit,targetPub){
 
 document.getElementById('startBtn').onclick=()=>{
   if(scanning) return;
-  clearOutput(); scanning=true; stopRequested=false;
+  outputEl.textContent=""; scanning=true; stopRequested=false;
   document.getElementById('startBtn').disabled=true;
   document.getElementById('stopBtn').disabled=false;
   const startHex=normalizeHex(document.getElementById('startHex').value);
@@ -177,10 +185,10 @@ document.getElementById('stopBtn').onclick=()=>{stopRequested=true; statusEl.tex
 document.getElementById('searchBalanceBtn').onclick=()=>{
   const minBal=parseInt(document.getElementById('balanceMin').value)||0;
   if(!pubToSeed.size){alert("Cache kosong. Jalankan scan dulu."); return;}
-  clearOutput();
+  outputEl.textContent="";
   for(const [pub58,seedHex] of pubToSeed){
     const bal=pubToBalance.get(pub58);
-    if(bal!==null && bal>=minBal) log(`${seedHex} → ${pub58} | Balance: ${bal}`);
+    if(bal!==null && bal>=minBal) outputEl.textContent+=`${seedHex} → ${pub58} | Balance: ${bal}\n`;
   }
   statusEl.textContent=`Search by balance ≥ ${minBal} selesai.`;
 };
