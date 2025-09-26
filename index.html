@@ -2,19 +2,19 @@
 <html lang="id">
 <head>
 <meta charset="utf-8"/>
-<title>Scan HEX → Pubkey & Balance — Search by Base58 & Balance</title>
+<title>Ultra-Fast + Parallel Balance</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <style>
 body{font-family:ui-monospace,monospace;padding:12px;max-width:980px;margin:auto}
 label{display:block;margin:6px 0}
 input,button,select{font-size:14px;padding:6px;margin:4px}
-#output{white-space:pre; border:1px solid #ddd; padding:8px; height:40vh; overflow:auto; font-size:12px}
+#output{white-space:pre; border:1px solid #ddd; padding:8px; height:50vh; overflow:auto; font-size:12px}
 .hit{background:#d4ffd4}
 #status{font-weight:600;margin:8px 4px}
 </style>
 </head>
 <body>
-<h2>Scan HEX → Ed25519 pubkey — Base58 + Balance Search</h2>
+<h2>Ultra-Fast HEX → Pubkey + Parallel Balance</h2>
 
 <label>Start HEX (64):
   <input id="startHex" size="70" value="0000000000000000000000000000000000000000000000000000000000000001">
@@ -22,31 +22,29 @@ input,button,select{font-size:14px;padding:6px;margin:4px}
 <label>End HEX (64):
   <input id="endHex" size="70" value="fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036411c">
 </label>
-<label>Batch size (max 10000):
-  <input id="batchSize" type="number" min="1" max="10000" value="500" style="width:120px">
+<label>Batch size:
+  <input id="batchSize" type="number" min="1" max="1000000" value="10000" style="width:120px">
 </label>
-<label>Work chunk (yield every N keys):
-  <input id="yieldEvery" type="number" min="8" max="16384" value="256" style="width:120px">
+<label>Yield every N keys:
+  <input id="yieldEvery" type="number" min="8" max="65536" value="1024" style="width:120px">
 </label>
 <label>RPC endpoint:
   <input id="rpcUrl" size="70" value="https://api.mainnet-beta.solana.com">
 </label>
-<label>RPC delay per call (ms):
-  <input id="rpcDelayMs" type="number" min="0" value="200" style="width:120px">
+<label>Parallel RPC fetch limit:
+  <input id="rpcParallel" type="number" min="1" max="200" value="50" style="width:120px">
 </label>
 
 <div>
-  <button id="startGenBtn">Generate Batch</button>
-  <button id="startAutoBtn">Start Auto Scan</button>
+  <button id="startBtn">Start Ultra-Fast Scan</button>
   <button id="stopBtn" disabled>Stop</button>
 </div>
 
-<label>Target PublicKey Base58:
-  <input id="searchInput" size="80" placeholder="paste pubkey base58">
-  <button id="searchBtn">Search</button>
+<label>Target Base58:
+  <input id="targetPub" size="80" placeholder="paste pubkey target">
 </label>
 
-<label>Search by Balance (lamports ≥ ):
+<label>Search by Balance ≥ :
   <input id="balanceMin" type="number" value="0" style="width:120px">
   <button id="searchBalanceBtn">Search</button>
 </label>
@@ -56,22 +54,8 @@ input,button,select{font-size:14px;padding:6px;margin:4px}
 
 <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js"></script>
 <script>
-/* ---------------- utils ---------------- */
 const ALPHABET="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-function encodeBase58(buffer){
-  let digits=[0];
-  for(let i=0;i<buffer.length;i++){
-    let carry=buffer[i];
-    for(let j=0;j<digits.length;j++){
-      carry+=digits[j]<<8;
-      digits[j]=carry%58;
-      carry=(carry/58)|0;
-    }
-    while(carry>0){digits.push(carry%58); carry=(carry/58)|0;}
-  }
-  for(let k=0;k<buffer.length&&buffer[k]===0;k++)digits.push(0);
-  return digits.reverse().map(d=>ALPHABET[d]).join('');
-}
+function encodeBase58(buffer){let digits=[0];for(let i=0;i<buffer.length;i++){let carry=buffer[i];for(let j=0;j<digits.length;j++){carry+=digits[j]<<8;digits[j]=carry%58;carry=(carry/58)|0;}while(carry>0){digits.push(carry%58);carry=(carry/58)|0;}}for(let k=0;k<buffer.length&&buffer[k]===0;k++)digits.push(0);return digits.reverse().map(d=>ALPHABET[d]).join('');}
 function normalizeHex(hex){hex=String(hex).trim().toLowerCase(); if(hex.startsWith("0x")) hex=hex.slice(2); if(!/^[0-9a-f]*$/.test(hex)) throw new Error("Invalid hex"); if(hex.length>64) throw new Error("Hex too long"); return hex.padStart(64,'0');}
 function hexToBigInt(hex){if(hex.startsWith("0x")) hex=hex.slice(2); return BigInt("0x"+hex);}
 function bigIntToHex(bi){let h=bi.toString(16); if(h.length%2) h="0"+h; return h.padStart(64,'0');}
@@ -79,101 +63,27 @@ function hexToUint8Array(hex){if(hex.startsWith("0x")) hex=hex.slice(2); if(hex.
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 function escapeHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-/* ---------------- cache ---------------- */
 const pubToSeed=new Map();
 const pubToBalance=new Map();
+let scanning=false,stopRequested=false,currentStartBigInt=null,endBigInt=null;
 
-/* ---------------- DOM ---------------- */
 const outputEl=document.getElementById('output');
 const statusEl=document.getElementById('status');
 function log(s){outputEl.textContent+=s+"\n"; outputEl.scrollTop=outputEl.scrollHeight;}
 function clearOutput(){outputEl.textContent="";}
 
-/* ---------------- RPC ---------------- */
-async function rpcPost(url,body,timeoutMs=20000){
-  const controller=new AbortController();
-  const id=setTimeout(()=>controller.abort(),timeoutMs);
-  try{
-    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:controller.signal});
-    clearTimeout(id);
-    return await res.json();
-  }catch(e){clearTimeout(id); throw e;}
-}
-async function getBalanceRpc(rpcUrl,pubkey){
-  const body={jsonrpc:"2.0",id:1,method:"getBalance",params:[pubkey]};
-  const r=await rpcPost(rpcUrl,body);
-  if(r && r.result && typeof r.result.value!=="undefined") return r.result.value;
-  return null;
-}
+function highlightPubkey(pub){const idx=outputEl.textContent.indexOf(pub);if(idx===-1)return;const before=outputEl.textContent.slice(0,idx);const match=pub;const after=outputEl.textContent.slice(idx+pub.length);outputEl.innerHTML=escapeHtml(before)+'<span class="hit">'+escapeHtml(match)+'</span>'+escapeHtml(after);}
 
-/* ---------------- generation + scan ---------------- */
-let scanning=false,stopRequested=false,currentStartBigInt=null,endBigInt=null;
+async function rpcPost(url,body,timeoutMs=20000){const controller=new AbortController(); const id=setTimeout(()=>controller.abort(),timeoutMs); try{const res=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:controller.signal}); clearTimeout(id); return await res.json();}catch(e){clearTimeout(id); throw e;}}
+async function getBalanceRpc(rpcUrl,pubkey){const body={jsonrpc:"2.0",id:1,method:"getBalance",params:[pubkey]}; const r=await rpcPost(rpcUrl,body); if(r && r.result && typeof r.result.value!=="undefined") return r.result.value; return null;}
 
-function generateBatchLines(startBig,batchSize,yieldEvery){
-  const out=[];
-  for(let i=0n;i<BigInt(batchSize);i++){
-    const val=startBig+i;
-    if(val>endBigInt) break;
-    const seedHex=bigIntToHex(val);
-    const seedBytes=hexToUint8Array(seedHex);
-    const keypair=nacl.sign.keyPair.fromSeed(seedBytes);
-    const pub58=encodeBase58(keypair.publicKey);
-    out.push({seedHex,pub58});
-    if(!pubToSeed.has(pub58)) pubToSeed.set(pub58,seedHex);
-    if((i+1n)%BigInt(yieldEvery)===0n){}
-  }
-  return out;
-}
-
-async function displayBatch(startBig,batchSize,yieldEvery){
-  const lines=generateBatchLines(startBig,batchSize,yieldEvery);
-  for(const it of lines){log(`${it.seedHex} → ${it.pub58}`);}
-  return lines.length;
-}
-
-/* ---------------- buttons ---------------- */
-document.getElementById('startGenBtn').onclick=async()=>{
-  try{
-    clearOutput();
-    statusEl.textContent="Generating one batch...";
-    const startHex=normalizeHex(document.getElementById('startHex').value);
-    const endHexLocal=normalizeHex(document.getElementById('endHex').value);
-    currentStartBigInt=hexToBigInt(startHex);
-    endBigInt=hexToBigInt(endHexLocal);
-    const batchSize=Math.min(10000,Math.max(1,parseInt(document.getElementById('batchSize').value,10)||500));
-    const yieldEvery=Math.max(8,parseInt(document.getElementById('yieldEvery').value,10)||256);
-    const n=await displayBatch(currentStartBigInt,batchSize,yieldEvery);
-    statusEl.textContent=`Generated ${n} entries starting ${bigIntToHex(currentStartBigInt)}.`;
-  }catch(err){statusEl.textContent="Error: "+String(err);}
-};
-
-document.getElementById('searchBtn').onclick=async()=>{
-  const q=document.getElementById('searchInput').value.trim();
-  if(!q){alert("Masukkan PublicKey Base58 target."); return;}
-  if(scanning){if(!confirm("Scan sedang berjalan. Hentikan dan mulai scan baru?")) return; stopRequested=true; await sleep(50); stopRequested=false;}
-  if(!currentStartBigInt){currentStartBigInt=hexToBigInt(normalizeHex(document.getElementById('startHex').value));}
-  clearOutput();
-  await autoScanForTarget(q);
-};
-
-document.getElementById('startAutoBtn').onclick=async()=>{
-  if(scanning) return;
-  scanning=true; stopRequested=false;
-  document.getElementById('startAutoBtn').disabled=true;
-  document.getElementById('stopBtn').disabled=false;
-  clearOutput();
-  statusEl.textContent="Auto-generating and caching pubkeys...";
-  const startHex=normalizeHex(document.getElementById('startHex').value);
-  const endHexLocal=normalizeHex(document.getElementById('endHex').value);
-  if(!currentStartBigInt) currentStartBigInt=hexToBigInt(startHex);
-  endBigInt=hexToBigInt(endHexLocal);
-  const batchSize=Math.min(10000,Math.max(1,parseInt(document.getElementById('batchSize').value,10)||500));
-  const yieldEvery=Math.max(8,parseInt(document.getElementById('yieldEvery').value,10)||256);
-  let batchCounter=0; let total=0n;
+async function ultraFastWithBalance(batchSize,yieldEvery,parallelLimit,targetPub){
+  let rpcUrl=document.getElementById('rpcUrl').value.trim();
+  let batchCounter=0;
   while(currentStartBigInt<=endBigInt && !stopRequested){
     batchCounter++;
-    statusEl.textContent=`Auto-generating batch #${batchCounter} (start ${bigIntToHex(currentStartBigInt)})`;
-    let produced=0;
+    statusEl.textContent=`Batch #${batchCounter} start: ${bigIntToHex(currentStartBigInt)}`;
+    const promises=[];
     for(let i=0n;i<BigInt(batchSize);i++){
       const val=currentStartBigInt+i;
       if(val>endBigInt) break;
@@ -181,118 +91,56 @@ document.getElementById('startAutoBtn').onclick=async()=>{
       const seedBytes=hexToUint8Array(seedHex);
       const kp=nacl.sign.keyPair.fromSeed(seedBytes);
       const pub58=encodeBase58(kp.publicKey);
-      if(!pubToSeed.has(pub58)) pubToSeed.set(pub58,seedHex);
-      if(produced<10) log(`${seedHex} → ${pub58}`);
-      produced++; total++;
+      pubToSeed.set(pub58,seedHex);
+      log(`${seedHex} → ${pub58}`);
+      if(pub58===targetPub){statusEl.textContent=`FOUND ✅ ${seedHex} → ${pub58}`; highlightPubkey(pub58); stopRequested=true; break;}
+      // queue balance fetch
+      const fetchPromise=(async()=>{
+        try{const bal=await getBalanceRpc(rpcUrl,pub58); pubToBalance.set(pub58,bal);}catch(e){pubToBalance.set(pub58,null);}
+      })();
+      promises.push(fetchPromise);
+      if(promises.length>=parallelLimit){await Promise.all(promises); promises.length=0;}
       if((i+1n)%BigInt(yieldEvery)===0n) await sleep(0);
+      if(stopRequested) break;
     }
-    currentStartBigInt=currentStartBigInt+BigInt(batchSize);
-    await sleep(10);
+    if(promises.length>0) await Promise.all(promises);
+    currentStartBigInt+=BigInt(batchSize);
+    await sleep(1);
   }
-  statusEl.textContent=stopRequested?`Stopped. Cached ${total} keys.`:`Finished auto-generation. Cached ${total} keys.`;
-  scanning=false; stopRequested=false; document.getElementById('startAutoBtn').disabled=false; document.getElementById('stopBtn').disabled=true;
+  if(!stopRequested) statusEl.textContent="Ultra-Fast + Parallel Balance scan done.";
+  scanning=false; stopRequested=false;
+  document.getElementById('startBtn').disabled=false;
+  document.getElementById('stopBtn').disabled=true;
+}
+
+document.getElementById('startBtn').onclick=()=>{
+  if(scanning) return;
+  clearOutput(); scanning=true; stopRequested=false;
+  document.getElementById('startBtn').disabled=true;
+  document.getElementById('stopBtn').disabled=false;
+  const startHex=normalizeHex(document.getElementById('startHex').value);
+  const endHexLocal=normalizeHex(document.getElementById('endHex').value);
+  currentStartBigInt=hexToBigInt(startHex);
+  endBigInt=hexToBigInt(endHexLocal);
+  const batchSize=Math.min(1000000,Math.max(1,parseInt(document.getElementById('batchSize').value)||10000));
+  const yieldEvery=Math.max(8,parseInt(document.getElementById('yieldEvery').value)||1024);
+  const parallelLimit=Math.max(1,parseInt(document.getElementById('rpcParallel').value)||50);
+  const targetPub=document.getElementById('targetPub').value.trim();
+  ultraFastWithBalance(batchSize,yieldEvery,parallelLimit,targetPub);
 };
 
-document.getElementById('stopBtn').onclick=function(){stopRequested=true; statusEl.textContent="Stop requested — will stop after current yield."; document.getElementById('stopBtn').disabled=true;};
+document.getElementById('stopBtn').onclick=()=>{stopRequested=true; statusEl.textContent="Stop requested...";};
 
-/* ---------------- Search by Balance ---------------- */
-document.getElementById('searchBalanceBtn').onclick=async()=>{
+document.getElementById('searchBalanceBtn').onclick=()=>{
   const minBal=parseInt(document.getElementById('balanceMin').value)||0;
-  if(!pubToSeed.size){alert("Cache kosong. Jalankan scan/generate dulu."); return;}
+  if(!pubToSeed.size){alert("Cache kosong. Jalankan scan dulu."); return;}
   clearOutput();
-  statusEl.textContent="Searching balances ≥ "+minBal;
-  const rpcUrl=document.getElementById('rpcUrl').value.trim();
   for(const [pub58,seedHex] of pubToSeed){
-    let bal=null;
-    if(pubToBalance.has(pub58)) bal=pubToBalance.get(pub58);
-    else{
-      try{ bal=await getBalanceRpc(rpcUrl,pub58); await sleep(parseInt(document.getElementById('rpcDelayMs').value)||200); pubToBalance.set(pub58,bal);}catch(e){log(`${seedHex} → ${pub58} | Balance ERR`);}
-    }
+    const bal=pubToBalance.get(pub58);
     if(bal!==null && bal>=minBal) log(`${seedHex} → ${pub58} | Balance: ${bal}`);
   }
-  statusEl.textContent="Search by balance done.";
+  statusEl.textContent=`Search by balance ≥ ${minBal} done.`;
 };
-
-/* ---------------- Auto scan for Base58 ---------------- */
-async function autoScanForTarget(targetBase58){
-  targetBase58=targetBase58.trim();
-  if(!targetBase58) return;
-  if(pubToSeed.has(targetBase58)){
-    const foundHex=pubToSeed.get(targetBase58);
-    statusEl.textContent=`Found in cache ✅ HEX: ${foundHex}`;
-    try{
-      const bal=await getBalanceRpc(document.getElementById('rpcUrl').value.trim(),targetBase58);
-      statusEl.textContent+=` | Balance: ${bal===null?'ERR':bal+' lamports'}`;
-    }catch(e){statusEl.textContent+=` | Balance fetch error: ${e.message||e}`;}
-    highlightPubkeyInOutput(targetBase58);
-    return;
-  }
-  scanning=true; stopRequested=false;
-  document.getElementById('stopBtn').disabled=false;
-  document.getElementById('startAutoBtn').disabled=true;
-  document.getElementById('searchBtn').disabled=true;
-  clearOutput();
-  try{
-    const startHex=normalizeHex(document.getElementById('startHex').value);
-    const endHexLocal=normalizeHex(document.getElementById('endHex').value);
-    if(!currentStartBigInt) currentStartBigInt=hexToBigInt(startHex);
-    endBigInt=hexToBigInt(endHexLocal);
-    const batchSize=Math.min(10000,Math.max(1,parseInt(document.getElementById('batchSize').value,10)||500));
-    const yieldEvery=Math.max(8,parseInt(document.getElementById('yieldEvery').value,10)||256);
-    const rpcUrl=document.getElementById('rpcUrl').value.trim();
-    const rpcDelayMs=Math.max(0,parseInt(document.getElementById('rpcDelayMs').value,10)||200);
-    let batchCounter=0,totalChecked=0n;
-    while(currentStartBigInt<=endBigInt && !stopRequested){
-      batchCounter++;
-      statusEl.textContent=`Scanning batch #${batchCounter} (start ${bigIntToHex(currentStartBigInt)}) ...`;
-      const batch=[];
-      for(let i=0n;i<BigInt(batchSize);i++){
-        const val=currentStartBigInt+i;
-        if(val>endBigInt) break;
-        const seedHex=bigIntToHex(val);
-        const seedBytes=hexToUint8Array(seedHex);
-        const kp=nacl.sign.keyPair.fromSeed(seedBytes);
-        const pub58=encodeBase58(kp.publicKey);
-        if(!pubToSeed.has(pub58)) pubToSeed.set(pub58,seedHex);
-        batch.push({seedHex,pub58});
-        totalChecked++;
-        if((i+1n)%BigInt(yieldEvery)===0n) await sleep(0);
-      }
-      const foundEntry=batch.find(e=>e.pub58===targetBase58);
-      const previewCount=Math.min(batch.length,10);
-      for(let j=0;j<previewCount;j++) log(`${batch[j].seedHex} → ${batch[j].pub58}`);
-      if(batch.length>previewCount) log(`... (${batch.length-previewCount} more entries in this batch)`);
-      if(foundEntry){
-        const seedHex=foundEntry.seedHex;
-        log(`\n<<< DITEMUKAN ✅ >>>\n${seedHex} → ${targetBase58}\n`);
-        statusEl.textContent=`Ditemukan ✅ HEX: ${seedHex} (total checked ${totalChecked})`;
-        try{
-          const bal=await getBalanceRpc(rpcUrl,targetBase58);
-          pubToBalance.set(targetBase58,bal);
-          statusEl.textContent+=` | Balance: ${bal===null?'ERR':bal+' lamports'}`;
-        }catch(e){statusEl.textContent+=` | Balance fetch error: ${e.message||e}`;}
-        highlightPubkeyInOutput(targetBase58);
-        break;
-      }
-      currentStartBigInt=currentStartBigInt+BigInt(batchSize);
-      await sleep(10);
-    }
-    if(!stopRequested && currentStartBigInt>endBigInt) statusEl.textContent=`Selesai — target tidak ditemukan. total checked ${totalChecked}`;
-    else if(stopRequested) statusEl.textContent=`Scan dihentikan. total checked ${totalChecked}`;
-  }catch(err){statusEl.textContent="Error: "+String(err); console.error(err);}
-  finally{ scanning=false; document.getElementById('stopBtn').disabled=true; document.getElementById('startAutoBtn').disabled=false; document.getElementById('searchBtn').disabled=false;}
-}
-
-function highlightPubkeyInOutput(pub58){
-  const idx=outputEl.textContent.indexOf(pub58);
-  if(idx===-1) return;
-  const before=outputEl.textContent.slice(0,idx);
-  const match=pub58;
-  const after=outputEl.textContent.slice(idx+pub58.length);
-  outputEl.innerHTML=escapeHtml(before)+'<span class="hit">'+escapeHtml(match)+'</span>'+escapeHtml(after);
-}
-
-window.onload=()=>{statusEl.textContent="Ready. Tip: paste Base58 target then click Search or filter by balance."; currentStartBigInt=null;}
 </script>
 </body>
 </html>
