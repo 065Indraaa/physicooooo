@@ -2,58 +2,86 @@
 <html lang="id">
 <head>
 <meta charset="utf-8"/>
-<title>Ultra-Fast + Parallel Balance</title>
+<title>HEX → Pubkey + Balance (Legible Output)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <style>
+body {
+  font-family: ui-monospace, monospace;
+  padding: 20px;
+  max-width: 1000px;
+  margin: auto;
+  background: #f9f9f9;
+}
+label {
+  display: block;
+  margin: 12px 0 6px 0;
+  font-weight: 500;
+}
+input, button, select {
+  font-size: 16px;
+  padding: 8px 10px;
+  margin: 4px 0;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+}
 #output {
-  white-space: pre;
+  white-space: pre-wrap;     
+  word-break: break-word;     
   border: 1px solid #bbb;
   padding: 12px;
-  height: 70vh;       /* lebih tinggi sehingga nyaman scroll */
-  overflow: auto;
-  font-size: 14px;    /* font sedikit lebih besar */
-  line-height: 1.4em; /* jarak antar baris */
+  height: 70vh;               
+  overflow-y: auto;           
+  font-size: 14px;            
+  line-height: 1.4em;         
   background: #fff;
 }
 .hit {
-  background: #d4ffd4;
+  background: #d4ffd4;        
   font-weight: bold;
+}
+#status {
+  font-weight: 600;
+  margin: 10px 4px;
+}
+button {
+  cursor: pointer;
+  margin-right: 6px;
 }
 </style>
 </head>
 <body>
-<h2>Ultra-Fast HEX → Pubkey + Parallel Balance</h2>
+<h2>HEX → Pubkey + Balance (Real-time)</h2>
 
 <label>Start HEX (64):
-  <input id="startHex" size="70" value="0000000000000000000000000000000000000000000000000000000000000001">
+  <input id="startHex" style="width:100%" value="0000000000000000000000000000000000000000000000000000000000000001">
 </label>
 <label>End HEX (64):
-  <input id="endHex" size="70" value="fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036411c">
+  <input id="endHex" style="width:100%" value="fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036411c">
 </label>
 <label>Batch size:
-  <input id="batchSize" type="number" min="1" max="1000000" value="10000" style="width:120px">
+  <input id="batchSize" type="number" min="1" max="100000" value="5000" style="width:150px">
 </label>
 <label>Yield every N keys:
-  <input id="yieldEvery" type="number" min="8" max="65536" value="1024" style="width:120px">
+  <input id="yieldEvery" type="number" min="8" max="65536" value="256" style="width:150px">
 </label>
 <label>RPC endpoint:
-  <input id="rpcUrl" size="70" value="https://api.mainnet-beta.solana.com">
+  <input id="rpcUrl" style="width:100%" value="https://api.mainnet-beta.solana.com">
 </label>
-<label>Parallel RPC fetch limit:
-  <input id="rpcParallel" type="number" min="1" max="200" value="50" style="width:120px">
+<label>Parallel RPC limit:
+  <input id="rpcParallel" type="number" min="1" max="200" value="50" style="width:150px">
 </label>
 
 <div>
-  <button id="startBtn">Start Ultra-Fast Scan</button>
+  <button id="startBtn">Start Scan</button>
   <button id="stopBtn" disabled>Stop</button>
 </div>
 
 <label>Target Base58:
-  <input id="targetPub" size="80" placeholder="paste pubkey target">
+  <input id="targetPub" style="width:100%" placeholder="paste pubkey target">
 </label>
 
 <label>Search by Balance ≥ :
-  <input id="balanceMin" type="number" value="0" style="width:120px">
+  <input id="balanceMin" type="number" value="0" style="width:150px">
   <button id="searchBalanceBtn">Search</button>
 </label>
 
@@ -85,7 +113,7 @@ function highlightPubkey(pub){const idx=outputEl.textContent.indexOf(pub);if(idx
 async function rpcPost(url,body,timeoutMs=20000){const controller=new AbortController(); const id=setTimeout(()=>controller.abort(),timeoutMs); try{const res=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:controller.signal}); clearTimeout(id); return await res.json();}catch(e){clearTimeout(id); throw e;}}
 async function getBalanceRpc(rpcUrl,pubkey){const body={jsonrpc:"2.0",id:1,method:"getBalance",params:[pubkey]}; const r=await rpcPost(rpcUrl,body); if(r && r.result && typeof r.result.value!=="undefined") return r.result.value; return null;}
 
-async function ultraFastWithBalance(batchSize,yieldEvery,parallelLimit,targetPub){
+async function scanWithBalance(batchSize,yieldEvery,parallelLimit,targetPub){
   let rpcUrl=document.getElementById('rpcUrl').value.trim();
   let batchCounter=0;
   while(currentStartBigInt<=endBigInt && !stopRequested){
@@ -100,14 +128,21 @@ async function ultraFastWithBalance(batchSize,yieldEvery,parallelLimit,targetPub
       const kp=nacl.sign.keyPair.fromSeed(seedBytes);
       const pub58=encodeBase58(kp.publicKey);
       pubToSeed.set(pub58,seedHex);
-      log(`${seedHex} → ${pub58}`);
-      if(pub58===targetPub){statusEl.textContent=`FOUND ✅ ${seedHex} → ${pub58}`; highlightPubkey(pub58); stopRequested=true; break;}
-      // queue balance fetch
-      const fetchPromise=(async()=>{
-        try{const bal=await getBalanceRpc(rpcUrl,pub58); pubToBalance.set(pub58,bal);}catch(e){pubToBalance.set(pub58,null);}
+
+      const p=(async()=>{
+        try{
+          const bal=await getBalanceRpc(rpcUrl,pub58);
+          pubToBalance.set(pub58,bal);
+          log(`${seedHex} → ${pub58} | Balance: ${bal}`);
+        }catch(e){
+          pubToBalance.set(pub58,null);
+          log(`${seedHex} → ${pub58} | Balance ERR`);
+        }
       })();
-      promises.push(fetchPromise);
+      promises.push(p);
       if(promises.length>=parallelLimit){await Promise.all(promises); promises.length=0;}
+
+      if(pub58===targetPub){statusEl.textContent=`FOUND ✅ ${seedHex} → ${pub58}`; highlightPubkey(pub58); stopRequested=true; break;}
       if((i+1n)%BigInt(yieldEvery)===0n) await sleep(0);
       if(stopRequested) break;
     }
@@ -115,7 +150,7 @@ async function ultraFastWithBalance(batchSize,yieldEvery,parallelLimit,targetPub
     currentStartBigInt+=BigInt(batchSize);
     await sleep(1);
   }
-  if(!stopRequested) statusEl.textContent="Ultra-Fast + Parallel Balance scan done.";
+  if(!stopRequested) statusEl.textContent="Scan selesai.";
   scanning=false; stopRequested=false;
   document.getElementById('startBtn').disabled=false;
   document.getElementById('stopBtn').disabled=true;
@@ -130,11 +165,11 @@ document.getElementById('startBtn').onclick=()=>{
   const endHexLocal=normalizeHex(document.getElementById('endHex').value);
   currentStartBigInt=hexToBigInt(startHex);
   endBigInt=hexToBigInt(endHexLocal);
-  const batchSize=Math.min(1000000,Math.max(1,parseInt(document.getElementById('batchSize').value)||10000));
-  const yieldEvery=Math.max(8,parseInt(document.getElementById('yieldEvery').value)||1024);
+  const batchSize=Math.min(100000,Math.max(1,parseInt(document.getElementById('batchSize').value)||5000));
+  const yieldEvery=Math.max(8,parseInt(document.getElementById('yieldEvery').value)||256);
   const parallelLimit=Math.max(1,parseInt(document.getElementById('rpcParallel').value)||50);
   const targetPub=document.getElementById('targetPub').value.trim();
-  ultraFastWithBalance(batchSize,yieldEvery,parallelLimit,targetPub);
+  scanWithBalance(batchSize,yieldEvery,parallelLimit,targetPub);
 };
 
 document.getElementById('stopBtn').onclick=()=>{stopRequested=true; statusEl.textContent="Stop requested...";};
@@ -147,7 +182,7 @@ document.getElementById('searchBalanceBtn').onclick=()=>{
     const bal=pubToBalance.get(pub58);
     if(bal!==null && bal>=minBal) log(`${seedHex} → ${pub58} | Balance: ${bal}`);
   }
-  statusEl.textContent=`Search by balance ≥ ${minBal} done.`;
+  statusEl.textContent=`Search by balance ≥ ${minBal} selesai.`;
 };
 </script>
 </body>
